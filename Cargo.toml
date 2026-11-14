@@ -1,0 +1,57 @@
+[package]
+name = "mumble-client-protocol"
+description = "Client side of the Mumble voice chat protocol: TLS control channel, protobuf messages, server state and the encrypted UDP voice transport"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Mumcord/mumble-client-protocol"
+documentation = "https://docs.rs/mumble-client-protocol"
+readme = "README.md"
+keywords = ["mumble", "voip", "protocol", "client"]
+categories = ["network-programming", "multimedia::audio"]
+include = [
+    "src/**",
+    "proto/**",
+    "examples/**",
+    "build.rs",
+    "README.md",
+    "NOTICE",
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
+]
+
+[lib]
+name = "mumble_client_protocol"
+
+[dependencies]
+tokio = { version = "1.54", features = ["full"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+bytes = "1"
+prost = "0.14"
+aes = "0.9"
+rand = "0.10"
+sha1 = "0.11"
+x509-parser = "0.18"
+base64 = "0.23"
+thiserror = "2"
+tracing = "0.1"
+
+[dev-dependencies]
+rcgen = "0.14"
+tokio = { version = "1.54", features = ["full", "test-util"] }
+
+[build-dependencies]
+prost-build = "0.14.5"
+protoc-bin-vendored = "3.3"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+# cargo-fuzz builds with `--cfg fuzzing`, which exposes the voice packet decoder to fuzz targets.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unwrap_used = "warn"
