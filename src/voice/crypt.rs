@@ -1,7 +1,12 @@
+// Ported from Mumble's src/crypto/CryptStateOCB2.cpp and the test vectors in TestCrypt.
+// Copyright 2005-2023 The Mumble Developers. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be found in
+// proto/LICENSE.mumble; see NOTICE.
+
 //! OCB2-AES128 as used by Mumble's UDP voice channel, ported from Mumble's
 //! `CryptStateOCB2.cpp` (1.5.735) so both sides agree bit for bit.
 //!
-//! The protocol's OCB2 has known weaknesses (spec §9). Like upstream we include the
+//! The protocol's OCB2 has known weaknesses. Like upstream we include the
 //! counter-measure against the XEX* attack (eprint 2019/311, section 9): when encrypting, a
 //! critical second-to-last block gets one bit flipped (inaudible), and when decrypting such a
 //! forged block is rejected.
