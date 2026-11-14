@@ -1,11 +1,11 @@
 //! Voice transport against the local test servers from `testenv/` (never public servers).
 //! Start the servers first (`testenv/up.sh v15`, `testenv/up.sh v14`), then run
-//! `MUMCORD_LIVE=1 cargo test --test voice_live -- --ignored --test-threads=1`.
-//! The fallback tests start `tools/netsim` themselves (via `cargo run`) on ports 64800–64803.
+//! `MUMBLE_LIVE=1 cargo test --test voice_live -- --ignored --test-threads=1`.
+//! The fallback tests put an in-process proxy in front of the server and cut its UDP leg.
 
 use std::net::SocketAddr;
-use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -15,13 +15,12 @@ use mumble_client_protocol::{
     ClientIdentity, ConnectConfig, Event, Handle, OutgoingAudio, Transport, VoiceEvent,
     VoicePacket, VoiceTransport, WhisperKind, connect,
 };
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::TcpStream;
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::mpsc::UnboundedReceiver;
 
-/// Ports of the v15 / v14 servers; `MUMCORD_PORT_BASE` moves them like `testenv/up.sh` does.
+/// Ports of the v15 / v14 servers; `MUMBLE_PORT_BASE` moves them like `testenv/up.sh` does.
 fn port(offset: u16) -> u16 {
-    std::env::var("MUMCORD_PORT_BASE")
+    std::env::var("MUMBLE_PORT_BASE")
         .ok()
         .and_then(|b| b.parse().ok())
         .unwrap_or(64738)
@@ -30,16 +29,17 @@ fn port(offset: u16) -> u16 {
 const WAIT: Duration = Duration::from_secs(10);
 
 fn live() -> bool {
-    let on = std::env::var("MUMCORD_LIVE").is_ok_and(|v| v == "1");
+    let on = std::env::var("MUMBLE_LIVE").is_ok_and(|v| v == "1");
     if !on {
-        eprintln!("skipped: set MUMCORD_LIVE=1 and start testenv/up.sh v15 / v14");
+        eprintln!("skipped: set MUMBLE_LIVE=1 and start testenv/up.sh v15 / v14");
     }
     on
 }
 
 fn identity() -> ClientIdentity {
     let generated =
-        rcgen::generate_simple_self_signed(vec!["mumcord-test".to_owned()]).expect("cert");
+        rcgen::generate_simple_self_signed(vec!["mumble-client-protocol-test".to_owned()])
+            .expect("cert");
     ClientIdentity {
         chain: vec![CertificateDer::clone(generated.cert.der())],
         key: PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
@@ -61,7 +61,7 @@ async fn client(port: u16, prefix: &str) -> Client {
         host: "127.0.0.1".to_owned(),
         port,
         username: format!("{prefix}-{:08x}", rand::random::<u32>()),
-        password: std::env::var("MUMCORD_TEST_SERVER_PASSWORD")
+        password: std::env::var("MUMBLE_TEST_SERVER_PASSWORD")
             .ok()
             .filter(|p| !p.is_empty()),
         tokens: Vec::new(),
@@ -78,7 +78,7 @@ async fn client(port: u16, prefix: &str) -> Client {
     let voice = Arc::new(voice);
     let session = conn.handle.state().session.expect("session");
 
-    // What the engine does: forward the voice-related control events.
+    // What an application does: forward the voice-related control events.
     let forward = Arc::clone(&voice);
     let mut control = conn.events;
     tokio::spawn(async move {
@@ -279,7 +279,7 @@ async fn wait_in_channel(client: &Client, session: u32, channel: u32) {
     .expect("move applied");
 }
 
-/// Issue #67: a whisper to a person reaches only that person, a shout to a channel only the
+/// A whisper to a person reaches only that person, a shout to a channel only the
 /// people in it, each marked as such; a third client in the sender's channel hears neither.
 async fn whisper(port: u16) {
     let mut a = client(port, "wa").await;
@@ -350,67 +350,74 @@ async fn whisper(port: u16) {
     assert!(got.iter().all(|p| p.whisper.is_none()));
 }
 
-/// The netsim proxy as a child process; killed on drop.
-struct Netsim {
-    child: Child,
-    proxy: u16,
-    control: SocketAddr,
+/// A TCP and UDP forwarder in front of the server whose UDP leg can be cut, so the client behind
+/// it loses UDP while its control connection stays up. The test runtime ends its tasks.
+struct Proxy {
+    port: u16,
+    block_udp: Arc<AtomicBool>,
 }
 
-impl Netsim {
-    async fn start(target: u16, proxy: u16, control: u16) -> Self {
-        let child = Command::new(env!("CARGO"))
-            .args(["run", "-q", "-p", "netsim", "--", "run"])
-            .args(["--listen", &format!("127.0.0.1:{proxy}")])
-            .args(["--target", &format!("127.0.0.1:{target}")])
-            .args(["--control", &format!("127.0.0.1:{control}")])
-            .stdout(Stdio::null())
-            .spawn()
-            .expect("spawn netsim");
-        let netsim = Self {
-            child,
-            proxy,
-            control: ([127, 0, 0, 1], control).into(),
-        };
-        // Allow for a first build of netsim.
-        tokio::time::timeout(Duration::from_secs(180), async {
-            while netsim.ctl("status").await.is_none() {
-                tokio::time::sleep(Duration::from_millis(200)).await;
-            }
-        })
-        .await
-        .expect("netsim did not start");
-        netsim
-    }
-
-    async fn ctl(&self, command: &str) -> Option<String> {
-        let mut stream = TcpStream::connect(self.control).await.ok()?;
-        stream
-            .write_all(format!("{command}\n").as_bytes())
+impl Proxy {
+    async fn start(target: u16) -> Self {
+        let tcp = TcpListener::bind("127.0.0.1:0").await.expect("proxy tcp");
+        let port = tcp.local_addr().expect("proxy addr").port();
+        // The client sends UDP to the same port as its TCP connection.
+        let udp = UdpSocket::bind(("127.0.0.1", port))
             .await
-            .ok()?;
-        let mut line = String::new();
-        BufReader::new(stream).read_line(&mut line).await.ok()?;
-        line.starts_with("ok").then_some(line)
+            .expect("proxy udp");
+        let upstream = UdpSocket::bind("127.0.0.1:0").await.expect("upstream udp");
+        upstream
+            .connect(("127.0.0.1", target))
+            .await
+            .expect("upstream connect");
+        tokio::spawn(async move {
+            while let Ok((mut client, _)) = tcp.accept().await {
+                tokio::spawn(async move {
+                    let mut server = TcpStream::connect(("127.0.0.1", target))
+                        .await
+                        .expect("proxy to server");
+                    // Ends when either side closes; the error is the closing side's.
+                    let _ = tokio::io::copy_bidirectional(&mut client, &mut server).await;
+                });
+            }
+        });
+        let block_udp = Arc::new(AtomicBool::new(false));
+        let blocked = Arc::clone(&block_udp);
+        tokio::spawn(async move {
+            let mut client = None;
+            let mut up = [0u8; 2048];
+            let mut down = [0u8; 2048];
+            loop {
+                tokio::select! {
+                    got = udp.recv_from(&mut up) => {
+                        let Ok((n, from)) = got else { continue };
+                        client = Some(from);
+                        if !blocked.load(Ordering::Relaxed) {
+                            let _ = upstream.send(&up[..n]).await;
+                        }
+                    }
+                    got = upstream.recv(&mut down) => {
+                        let Ok(n) = got else { continue };
+                        if let Some(to) = client.filter(|_| !blocked.load(Ordering::Relaxed)) {
+                            let _ = udp.send_to(&down[..n], to).await;
+                        }
+                    }
+                }
+            }
+        });
+        Self { port, block_udp }
     }
 }
 
-impl Drop for Netsim {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-async fn fallback(port: u16, proxy: u16, control: u16) {
-    let net = Netsim::start(port, proxy, control).await;
-    let mut a = client(net.proxy, "fa").await;
+async fn fallback(port: u16) {
+    let net = Proxy::start(port).await;
+    let mut a = client(net.port, "fa").await;
     let mut b = client(port, "fb").await;
     a.wait_transport(Transport::Udp, WAIT).await;
     b.wait_transport(Transport::Udp, WAIT).await;
 
     // UDP blocked: a falls back to the tunnel, audio still flows both ways.
-    net.ctl("block-udp on").await.expect("block");
+    net.block_udp.store(true, Ordering::Relaxed);
     a.wait_transport(Transport::Tcp, Duration::from_secs(8))
         .await;
     assert_eq!(a.voice.stats().rtt, None);
@@ -422,7 +429,7 @@ async fn fallback(port: u16, proxy: u16, control: u16) {
     check_burst(&a.hear(b.session, 7).await, 20, Transport::Tcp, false);
 
     // UDP back: a returns to UDP; the server keeps tunnelling to a until a talked over UDP.
-    net.ctl("block-udp off").await.expect("unblock");
+    net.block_udp.store(false, Ordering::Relaxed);
     a.wait_transport(Transport::Udp, Duration::from_secs(8))
         .await;
     b.drain();
@@ -434,7 +441,7 @@ async fn fallback(port: u16, proxy: u16, control: u16) {
 }
 
 #[tokio::test]
-#[ignore = "needs testenv v15 and MUMCORD_LIVE=1"]
+#[ignore = "needs testenv v15 and MUMBLE_LIVE=1"]
 async fn v15_udp_audio() {
     if live() {
         udp_audio(port(0)).await;
@@ -442,7 +449,7 @@ async fn v15_udp_audio() {
 }
 
 #[tokio::test]
-#[ignore = "needs testenv v14 and MUMCORD_LIVE=1"]
+#[ignore = "needs testenv v14 and MUMBLE_LIVE=1"]
 async fn v14_udp_audio() {
     if live() {
         udp_audio(port(1)).await;
@@ -450,7 +457,7 @@ async fn v14_udp_audio() {
 }
 
 #[tokio::test]
-#[ignore = "needs testenv v15 and MUMCORD_LIVE=1"]
+#[ignore = "needs testenv v15 and MUMBLE_LIVE=1"]
 async fn v15_listener() {
     if live() {
         listener(port(0)).await;
@@ -458,7 +465,7 @@ async fn v15_listener() {
 }
 
 #[tokio::test]
-#[ignore = "needs testenv v14 and MUMCORD_LIVE=1"]
+#[ignore = "needs testenv v14 and MUMBLE_LIVE=1"]
 async fn v14_listener() {
     if live() {
         listener(port(1)).await;
@@ -466,7 +473,7 @@ async fn v14_listener() {
 }
 
 #[tokio::test]
-#[ignore = "needs testenv v15 and MUMCORD_LIVE=1"]
+#[ignore = "needs testenv v15 and MUMBLE_LIVE=1"]
 async fn v15_whisper_and_shout() {
     if live() {
         whisper(port(0)).await;
@@ -474,7 +481,7 @@ async fn v15_whisper_and_shout() {
 }
 
 #[tokio::test]
-#[ignore = "needs testenv v14 and MUMCORD_LIVE=1"]
+#[ignore = "needs testenv v14 and MUMBLE_LIVE=1"]
 async fn v14_whisper_and_shout() {
     if live() {
         whisper(port(1)).await;
@@ -482,17 +489,17 @@ async fn v14_whisper_and_shout() {
 }
 
 #[tokio::test]
-#[ignore = "needs testenv v15, MUMCORD_LIVE=1 and tools/netsim"]
+#[ignore = "needs testenv v15 and MUMBLE_LIVE=1"]
 async fn v15_fallback_to_tcp_and_back() {
     if live() {
-        fallback(port(0), 64800, 64801).await;
+        fallback(port(0)).await;
     }
 }
 
 #[tokio::test]
-#[ignore = "needs testenv v14, MUMCORD_LIVE=1 and tools/netsim"]
+#[ignore = "needs testenv v14 and MUMBLE_LIVE=1"]
 async fn v14_fallback_to_tcp_and_back() {
     if live() {
-        fallback(port(1), 64802, 64803).await;
+        fallback(port(1)).await;
     }
 }

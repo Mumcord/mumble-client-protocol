@@ -1,23 +1,23 @@
-//! Registered users against the local test server (Epic 4, issue #256, AC-10.37).
+//! Registered users against the local test server.
 //! Start the server first, then:
-//! `MUMCORD_LIVE=1 cargo test --test live_registered_users -- --ignored --test-threads=1`
+//! `MUMBLE_LIVE=1 cargo test --test live_registered_users -- --ignored --test-threads=1`
 //!
 //! What the run measures on mumble-server 1.5.735 with the default settings:
 //! - an entry-less `UserList` asks for the list, and the server answers with every account it has;
 //!   it sends the list **only** when asked, so a change is followed by a fresh query and never by a
-//!   push. That is why Mumcord shows the server's list after saving instead of its own wish;
+//!   push. A client should therefore show the server's list after saving, not its own wish;
 //! - `UserState` with `user_id = 0` registers an online person under their current name. The person
-//!   and the admin both learn the new id through `UserState`, which is what hides the person menu
-//!   item afterwards;
+//!   and the admin both learn the new id through `UserState`, so a client can stop offering
+//!   registration afterwards;
 //! - one `UserList` entry with a name renames that account, one without a name removes it, and the
 //!   person can connect again as a guest (no `user_id`);
 //! - a rename onto a name another account holds is **not** refused: the server logs it, keeps the
 //!   old name in its list and gives no answer of its own, so the caller has to read the list back;
 //! - the server reports `last_seen` and `last_channel` for an account it has seen;
 //! - a client without the Register right is refused with `PermissionDenied` naming `Perm::Register`
-//!   in the root channel, which is what hides the window and the menu items (FR-10.1, FR-10.2).
+//!   in the root channel, so a client can hide user management.
 //!
-//! The test server is shared by the worktrees, so the run removes every account it created.
+//! The test server may be shared with other test runs, so the run removes every account it created.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,10 +29,16 @@ use mumble_client_protocol::{
 };
 use tokio::sync::mpsc::UnboundedReceiver;
 
-const PORT: u16 = 64738;
+/// Port of the v15 server; `MUMBLE_PORT_BASE` moves it like `testenv/up.sh` does.
+fn v15() -> u16 {
+    std::env::var("MUMBLE_PORT_BASE")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(64738)
+}
 const WAIT: Duration = Duration::from_secs(10);
 
-/// Names this test owns, so a run of another worktree cannot collide with them.
+/// Names this test owns, so another test run cannot collide with them.
 const GUEST: &str = "live-reg-guest";
 const OTHER: &str = "live-reg-other";
 const RENAMED: &str = "live-reg-renamed";
@@ -74,7 +80,8 @@ fn superuser_password() -> Option<String> {
         .ok()
         .filter(|p| !p.is_empty());
     from_env.or_else(|| {
-        let dir = std::env::var("MUMCORD_TESTENV_DIR").ok()?;
+        let dir = std::env::var("MUMBLE_TESTENV_DIR")
+            .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/testenv").to_owned());
         std::fs::read_to_string(format!("{dir}/.env"))
             .ok()?
             .lines()
@@ -88,7 +95,7 @@ fn superuser_password() -> Option<String> {
 fn config(login: &str, ident: ClientIdentity, admin: bool) -> ConnectConfig {
     ConnectConfig {
         host: "127.0.0.1".to_owned(),
-        port: PORT,
+        port: v15(),
         username: login.to_owned(),
         password: if admin { superuser_password() } else { None },
         tokens: Vec::new(),
@@ -178,7 +185,7 @@ fn entry_of(list: &[RegisteredUser], user_id: u32) -> Option<&RegisteredUser> {
 }
 
 /// Removes the accounts of these names that the server still holds, so a run starts and ends clean
-/// on a test server the other worktrees share.
+/// on a test server other runs may share.
 async fn remove(admin: &mut Connection, names: &[&str]) {
     let list = query(&admin.handle, &mut admin.events).await;
     for entry in list.iter().filter(|user| {
@@ -197,7 +204,7 @@ async fn remove(admin: &mut Connection, names: &[&str]) {
 #[tokio::test]
 #[ignore = "needs the local test server (testenv/up.sh v15)"]
 async fn registers_renames_and_unregisters_an_account() {
-    if std::env::var("MUMCORD_LIVE").is_ok_and(|v| v != "1") {
+    if std::env::var("MUMBLE_LIVE").is_ok_and(|v| v != "1") {
         return;
     }
     let mut admin = connect_superuser("live-reg-admin").await;
@@ -210,7 +217,7 @@ async fn registers_renames_and_unregisters_an_account() {
         "the account must not exist before the test registers it"
     );
 
-    // 2. Register an online person (FR-10.20, AC-10.15): `UserState` with `user_id = 0` takes the
+    // 2. Register an online person: `UserState` with `user_id = 0` takes the
     //    name they connect under and the certificate they presented.
     let tove = person(GUEST);
     let mut guest = tove.connect().await;
@@ -226,7 +233,7 @@ async fn registers_renames_and_unregisters_an_account() {
     admin.handle.flush().await.expect("flush");
     let id = wait_registered(&mut guest.events, guest_session).await;
 
-    // 3. The list holds the account under that name, with last seen and last channel (issue #256).
+    // 3. The list holds the account under that name, with last seen and last channel.
     let list = query(&admin.handle, &mut admin.events).await;
     let account = named(&list, GUEST)
         .into_iter()
@@ -245,7 +252,7 @@ async fn registers_renames_and_unregisters_an_account() {
         "this server reports when an account was last used"
     );
 
-    // 4. Rename (AC-10.37): one entry with a new name, which the server applies to that id alone.
+    // 4. Rename: one entry with a new name, which the server applies to that id alone.
     admin
         .handle
         .change_registered_user(id, Some(RENAMED))
@@ -288,8 +295,8 @@ async fn registers_renames_and_unregisters_an_account() {
     assert_eq!(
         named(&kept, OTHER).len(),
         1,
-        "the server does not let two accounts hold one name, and says nothing about it — so the
-         window must show the list it reads back, not the name that was typed"
+        "the server does not let two accounts hold one name, and says nothing about it — so a
+         client must show the list it reads back, not the name that was typed"
     );
     assert_eq!(
         entry_of(&kept, id).and_then(|user| user.name.as_deref()),
@@ -297,7 +304,7 @@ async fn registers_renames_and_unregisters_an_account() {
         "the account that was to be renamed keeps the name the server holds"
     );
 
-    // 6. Unregister (AC-10.37, issue): one entry without a name. The account is out of the list,
+    // 6. Unregister: one entry without a name. The account is out of the list,
     //    the other one stands, and the person may connect again — this time as a guest.
     admin
         .handle
@@ -337,7 +344,7 @@ async fn registers_renames_and_unregisters_an_account() {
     back.handle.disconnect();
 
     // 7. Without the Register right the same query is refused, and the server names the bit it
-    //    checked, which is what hides the window and the menu items (FR-10.1, FR-10.2).
+    //    checked, so a client can hide user management.
     let mut plain = person("live-reg-plain").connect().await;
     plain.handle.query_user_list().expect("send");
     plain.handle.flush().await.expect("flush");

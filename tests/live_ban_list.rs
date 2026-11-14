@@ -1,20 +1,20 @@
-//! Ban list read, edit and save against the local test server (issue #254), and the result of
-//! spike S1 of spec 10 FR-10.68. Start the server first, then:
-//! `MUMCORD_LIVE=1 cargo test --test live_ban_list -- --ignored --test-threads=1`
+//! Ban list read, edit and save against the local test server.
+//! Start the server first, then:
+//! `MUMBLE_LIVE=1 cargo test --test live_ban_list -- --ignored --test-threads=1`
 //!
 //! What the run measures on mumble-server 1.5.735 with the default settings:
 //! - a `BanList` message without `query` replaces the server's list, so an empty one clears it;
 //! - the server answers `start` in the extended ISO form, which `ban::parse_iso` reads, and keeps the
 //!   subnet length it was given. It counts the length on the 16-byte wire address, so a stored 32
-//!   covers only the first four bytes of that form and matches every IPv4 client: Mumcord writes a
-//!   single IPv4 as 128 and shows it as /32 (issue #253);
+//!   covers only the first four bytes of that form and matches every IPv4 client: a single IPv4
+//!   must be written as 128 (see `ban::wire_mask`) and reads as /32;
 //! - at connect the server matches the **address** part of an entry; the certificate is only reached
-//!   when the address matches too, so an entry with a documentation address reaches nobody. Mumcord
-//!   therefore writes the address the server reports for the person (FR-10.14): a ban by
+//!   when the address matches too, so an entry with a documentation address reaches nobody. A client
+//!   therefore has to write the address the server reports for the person: a ban by
 //!   certificate alone does not work on a standard server;
 //! - the query is answered only with the Ban right in the root channel.
 //!
-//! The test server is shared by the worktrees, so the run starts and ends with an empty list.
+//! The test server may be shared with other test runs, so the run starts and ends with an empty list.
 
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -26,7 +26,13 @@ use mumble_client_protocol::{
 };
 use tokio::sync::mpsc::UnboundedReceiver;
 
-const PORT: u16 = 64738;
+/// Port of the v15 server; `MUMBLE_PORT_BASE` moves it like `testenv/up.sh` does.
+fn v15() -> u16 {
+    std::env::var("MUMBLE_PORT_BASE")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(64738)
+}
 const WAIT: Duration = Duration::from_secs(10);
 
 /// The same certificate again, so one client can be checked before and after an entry is written.
@@ -49,7 +55,7 @@ impl TestIdentity {
     fn config(&self, username: &str, admin: bool) -> ConnectConfig {
         ConnectConfig {
             host: "127.0.0.1".to_owned(),
-            port: PORT,
+            port: v15(),
             username: username.to_owned(),
             password: if admin { superuser_password() } else { None },
             tokens: Vec::new(),
@@ -68,7 +74,8 @@ fn superuser_password() -> Option<String> {
         .ok()
         .filter(|p| !p.is_empty());
     from_env.or_else(|| {
-        let dir = std::env::var("MUMCORD_TESTENV_DIR").ok()?;
+        let dir = std::env::var("MUMBLE_TESTENV_DIR")
+            .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/testenv").to_owned());
         std::fs::read_to_string(format!("{dir}/.env"))
             .ok()?
             .lines()
@@ -109,7 +116,7 @@ fn entry(hash: Option<String>, address: IpAddr, mask: u32, reason: &str) -> ban:
 #[tokio::test]
 #[ignore = "needs the local test server (testenv/up.sh v15)"]
 async fn reads_edits_and_saves_the_ban_list() {
-    if std::env::var("MUMCORD_LIVE").is_ok_and(|v| v != "1") {
+    if std::env::var("MUMBLE_LIVE").is_ok_and(|v| v != "1") {
         return;
     }
     let banned = identity("ban-banned-certificate");
@@ -126,7 +133,7 @@ async fn reads_edits_and_saves_the_ban_list() {
     let mut list = read_list(&mut admin.events).await;
     assert!(list.is_empty(), "the test server starts without bans");
 
-    // Without the Ban right the query is refused, so the menu item is not shown (FR-10.2).
+    // Without the Ban right the query is refused, so a client can hide ban management.
     let guest = identity("ban-guest");
     let mut plain = connect(guest.config("ban-guest", false))
         .await
@@ -147,7 +154,7 @@ async fn reads_edits_and_saves_the_ban_list() {
     assert_eq!(denied.permission, Some(permissions::BAN));
     plain.handle.disconnect();
 
-    // Add: one entry with a certificate and one with an address only (spike S1).
+    // Add: one entry with a certificate and one with an address only.
     list.push(entry(
         Some(banned.hash.clone()),
         doc,
@@ -175,7 +182,7 @@ async fn reads_edits_and_saves_the_ban_list() {
         "and goes out in the length the server counts"
     );
 
-    // Edit the reason and the end of one entry; the change is visible on the next read (AC-10.2).
+    // Edit the reason and the end of one entry; the change is visible on the next read.
     let mut edited = saved.clone();
     for b in &mut edited {
         if b.hash.as_deref() == Some(banned.hash.as_str()) {
@@ -193,35 +200,35 @@ async fn reads_edits_and_saves_the_ban_list() {
     assert_eq!(row.map(|b| b.reason.as_deref()), Some(Some("spam links")));
     assert_eq!(row.map(|b| b.duration), Some(86_400));
 
-    // What an entry reaches at connect is measured in `live_kick_ban` (issue #253): the server
-    // compares the address part, so a documentation address reaches nobody, which is why Mumcord
-    // writes the address it reports for the person.
+    // What an entry reaches at connect is measured in `live_kick_ban`: the server
+    // compares the address part, so a documentation address reaches nobody, which is why a client
+    // has to write the address it reports for the person.
     admin.handle.disconnect();
 }
 
 #[tokio::test]
 #[ignore = "needs the local test server (testenv/up.sh v15)"]
 async fn a_single_address_is_banned_only_for_that_address() {
-    if std::env::var("MUMCORD_LIVE").is_ok_and(|v| v != "1") {
+    if std::env::var("MUMBLE_LIVE").is_ok_and(|v| v != "1") {
         return;
     }
-    let untouched = identity("mask-spike-untouched");
+    let untouched = identity("mask-untouched");
     let doc: IpAddr = "203.0.113.1".parse().expect("address");
     let admin = connect(untouched.config("SuperUser", true))
         .await
         .expect("SuperUser login");
 
     // An entry that carries 32 while the address is 16 bytes long matches every IPv4 client, so
-    // Mumcord writes the wire length instead: with it a documentation address leaves other clients
-    // free (issue #253).
+    // the client writes the wire length instead: with it a documentation address leaves other clients
+    // free.
     admin
         .handle
         .send_ban_list(&[entry(None, doc, 32, "documentation")])
         .expect("save");
     admin.handle.flush().await.expect("flush");
 
-    let other = identity("mask-spike-other");
-    let free = connect(other.config("mask-spike-other", false)).await;
+    let other = identity("mask-other");
+    let free = connect(other.config("mask-other", false)).await;
     assert!(free.is_ok(), "another address is not touched by that entry");
 
     admin.handle.send_ban_list(&[]).expect("unban");

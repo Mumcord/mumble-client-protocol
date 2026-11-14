@@ -15,15 +15,20 @@ use mumble_client_protocol::{
 };
 use tokio::sync::mpsc::UnboundedReceiver;
 
-const V15: u16 = 64738;
-const V14: u16 = 64739;
-const V13: u16 = 64740;
-const LIMIT: u16 = 64741;
+/// Ports of the servers from `testenv/up.sh`; `MUMBLE_PORT_BASE` moves them all.
+fn port(offset: u16) -> u16 {
+    std::env::var("MUMBLE_PORT_BASE")
+        .ok()
+        .and_then(|b| b.parse().ok())
+        .unwrap_or(64738)
+        + offset
+}
 const WAIT: Duration = Duration::from_secs(10);
 
 fn identity() -> ClientIdentity {
     let generated =
-        rcgen::generate_simple_self_signed(vec!["mumcord-test".to_owned()]).expect("cert");
+        rcgen::generate_simple_self_signed(vec!["mumble-client-protocol-test".to_owned()])
+            .expect("cert");
     ClientIdentity {
         chain: vec![CertificateDer::clone(generated.cert.der())],
         key: PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
@@ -41,7 +46,7 @@ fn config(port: u16, name: &str, accept: bool) -> ConnectConfig {
         host: "127.0.0.1".to_owned(),
         port,
         username: name.to_owned(),
-        password: std::env::var("MUMCORD_TEST_SERVER_PASSWORD")
+        password: std::env::var("MUMBLE_TEST_SERVER_PASSWORD")
             .ok()
             .filter(|p| !p.is_empty()),
         tokens: Vec::new(),
@@ -71,7 +76,8 @@ fn superuser_password() -> Option<String> {
         .ok()
         .filter(|p| !p.is_empty());
     from_env.or_else(|| {
-        let dir = std::env::var("MUMCORD_TESTENV_DIR").ok()?;
+        let dir = std::env::var("MUMBLE_TESTENV_DIR")
+            .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/testenv").to_owned());
         std::fs::read_to_string(format!("{dir}/.env"))
             .ok()?
             .lines()
@@ -261,19 +267,19 @@ async fn full_scenario(port: u16, server_stores_volume: bool) {
 #[tokio::test]
 #[ignore = "needs testenv/up.sh v15"]
 async fn v15_full_flow() {
-    full_scenario(V15, true).await;
+    full_scenario(port(0), true).await;
 }
 
 #[tokio::test]
 #[ignore = "needs testenv/up.sh v14"]
 async fn v14_full_flow() {
-    full_scenario(V14, false).await;
+    full_scenario(port(1), false).await;
 }
 
 #[tokio::test]
 #[ignore = "needs testenv/up.sh v13"]
 async fn v13_has_no_listening() {
-    let conn = login(V13, "old").await;
+    let conn = login(port(2), "old").await;
     let version = conn.handle.server_version().expect("version");
     assert_eq!((version.major, version.minor), (1, 3));
     assert!(!conn.handle.state().server.supports_listening());
@@ -287,7 +293,7 @@ async fn v13_has_no_listening() {
 #[tokio::test]
 #[ignore = "needs testenv/up.sh limit"]
 async fn listener_limit_is_a_typed_denial() {
-    let mut conn = login(LIMIT, "limited").await;
+    let mut conn = login(port(3), "limited").await;
     let lobby = channel_id(&conn, "Lobby");
     conn.handle.listen(&[lobby]).expect("send");
     let denied = wait_for(&mut conn.events, "listener denial", |e| match e {
@@ -309,7 +315,7 @@ async fn listener_limit_is_a_typed_denial() {
 #[ignore = "needs testenv/up.sh v15"]
 async fn rejected_certificate_reports_fingerprint() {
     let seen = Arc::new(Mutex::new(None));
-    let mut cfg = config(V15, &unique("tofu"), false);
+    let mut cfg = config(port(0), &unique("tofu"), false);
     let seen_in_cb = seen.clone();
     cfg.verify_cert = Arc::new(move |cert| {
         *seen_in_cb.lock().expect("lock") = Some(cert.sha256_hex.clone());
@@ -345,19 +351,19 @@ async fn no_old_client_warning(port: u16) {
 #[tokio::test]
 #[ignore = "needs testenv/up.sh v15"]
 async fn v15_sees_client_version_before_authenticate() {
-    no_old_client_warning(V15).await;
+    no_old_client_warning(port(0)).await;
 }
 
 #[tokio::test]
 #[ignore = "needs testenv/up.sh v14"]
 async fn v14_sees_client_version_before_authenticate() {
-    no_old_client_warning(V14).await;
+    no_old_client_warning(port(1)).await;
 }
 
 #[tokio::test]
 #[ignore = "needs testenv/up.sh v15 with SUPERUSER_PASSWORD"]
 async fn acl_query_answers_admins_and_refuses_others() {
-    let mut admin = login_superuser(V15).await;
+    let mut admin = login_superuser(port(0)).await;
     // A temporary channel keeps the shared test server clean: murmur removes it once the last user
     // leaves, so the group and the ACL entry written here disappear with the test.
     let room_name = unique("acl-room");
@@ -426,7 +432,7 @@ async fn acl_query_answers_admins_and_refuses_others() {
     );
 
     // Someone without the Write permission is refused by the server, and the denial is clear.
-    let mut visitor = login(V15, "acl-visitor").await;
+    let mut visitor = login(port(0), "acl-visitor").await;
     visitor.handle.query_acl(room).expect("send");
     let denied = wait_for(
         &mut visitor.events,

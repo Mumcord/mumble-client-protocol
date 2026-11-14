@@ -1,20 +1,22 @@
-//! Disconnecting right after sending must not lose what is still in the rate-limited queue
-//! (issue #74). Runs against the local v15 test server (`testenv/up.sh v15`, never public servers);
-//! `MUMCORD_PORT_BASE` selects another testenv instance, as in `testenv/env.sh`:
+//! Disconnecting right after sending must not lose what is still in the rate-limited queue.
+//! Runs against the local v15 test server (`testenv/up.sh v15`, never public servers);
+//! `MUMBLE_PORT_BASE` selects another testenv instance, as in `testenv/env.sh`:
 //! `cargo test --test live_drain -- --ignored`.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use mumble_client_protocol::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
-use mumble_client_protocol::{ClientIdentity, ConnectConfig, Connection, Event, TextTarget, connect};
+use mumble_client_protocol::{
+    ClientIdentity, ConnectConfig, Connection, Event, TextTarget, connect,
+};
 
 const WAIT: Duration = Duration::from_secs(10);
 /// One more than the client's burst of 4, so the last one is still paced when we disconnect.
 const SENT: usize = 5;
 
 fn v15() -> u16 {
-    std::env::var("MUMCORD_PORT_BASE")
+    std::env::var("MUMBLE_PORT_BASE")
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(64738)
@@ -22,7 +24,8 @@ fn v15() -> u16 {
 
 fn identity() -> ClientIdentity {
     let generated =
-        rcgen::generate_simple_self_signed(vec!["mumcord-test".to_owned()]).expect("cert");
+        rcgen::generate_simple_self_signed(vec!["mumble-client-protocol-test".to_owned()])
+            .expect("cert");
     ClientIdentity {
         chain: vec![CertificateDer::clone(generated.cert.der())],
         key: PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
@@ -36,7 +39,7 @@ async fn login(prefix: &str) -> Connection {
         host: "127.0.0.1".to_owned(),
         port: v15(),
         username: format!("{prefix}-{:08x}", rand::random::<u32>()),
-        password: std::env::var("MUMCORD_TEST_SERVER_PASSWORD")
+        password: std::env::var("MUMBLE_TEST_SERVER_PASSWORD")
             .ok()
             .filter(|p| !p.is_empty()),
         tokens: Vec::new(),
