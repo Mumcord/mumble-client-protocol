@@ -1,4 +1,4 @@
-//! The server's list of registered users (Epic 4, issue #256).
+//! The server's list of registered users.
 //!
 //! A client asks with a `UserList` that carries no entries; the server answers with every account it
 //! has, and sends the list again after a change. There is no single-entry message shape beyond this:

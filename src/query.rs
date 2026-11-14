@@ -1,4 +1,4 @@
-//! The public server query behind the `mumble://` link card (issue #175).
+//! The public server query for server lists and `mumble://` link previews.
 //!
 //! A client can ask a Mumble server for its version, the users online and its user limit without
 //! connecting: the UDP ping that requests "extended information". Servers since 1.2.3 answer it
@@ -9,7 +9,7 @@
 //! - Legacy (servers up to 1.4): the only format older servers know, and its version field cannot
 //!   hold a patch number above 255.
 //!
-//! The engine asks in the modern format and falls back to the legacy one, so old servers answer
+//! A client asks in the modern format and falls back to the legacy one, so old servers answer
 //! too. Everything that comes back is untrusted input.
 
 use prost::Message;

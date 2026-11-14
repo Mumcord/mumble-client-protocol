@@ -165,7 +165,7 @@ pub enum Event {
     PermissionsUpdated {
         channel_id: Option<u32>,
         /// The server dropped every cached permission (`flush`), e.g. after an ACL or group
-        /// change: the client asks again for the channels it needs (#248).
+        /// change: the client asks again for the channels it needs.
         flush: bool,
     },
     /// A channel's groups and ACL entries, the answer to [`Handle::query_acl`]. Standard servers
@@ -178,10 +178,10 @@ pub enum Event {
     /// The server's ban list, the answer to [`Handle::query_ban_list`]. Standard servers send it
     /// only to users with the Ban permission in the root channel, so a refusal arrives as
     /// [`Event::PermissionDenied`] with `permission == [`crate::permissions::BAN`]. Texts and
-    /// addresses are untrusted server input (issue #254).
+    /// addresses are untrusted server input.
     BanList(Vec<crate::ban::Ban>),
     /// The server's registered accounts, the answer to [`Handle::query_user_list`] and every push
-    /// it sends after a change (issue #256). Standard servers send it only to users with the
+    /// it sends after a change. Standard servers send it only to users with the
     /// Register permission in the root channel. `last_seen` and `last_channel` stay `None` on
     /// servers that do not report them. Names are untrusted server text.
     UserList(Vec<crate::registered::RegisteredUser>),
@@ -275,7 +275,7 @@ impl Shared {
 
 /// Own ping figures, sent along with every keep-alive ping. The server keeps only what each
 /// client reports about itself and hands that out in UserStats, so without them everyone else
-/// sees no ping for this user (FR-2.25).
+/// sees no ping for this user.
 struct PingReport {
     started: Instant,
     tcp_packets: u32,
@@ -517,9 +517,10 @@ async fn connect_inner(
 /// The release name sent in the Version message; see [`set_client_release`].
 static CLIENT_RELEASE: OnceLock<String> = OnceLock::new();
 
-/// Sets the release name servers show for this client (default `Mumcord <crate version>`), so an
-/// app can report its own build version. A process-wide setting, because the name belongs to the
-/// running program rather than to one connection; only the first call takes effect.
+/// Sets the release name servers show for this client (default
+/// `mumble-client-protocol <crate version>`), so an app can report its own name and build version.
+/// A process-wide setting, because the name belongs to the running program rather than to one
+/// connection; only the first call takes effect.
 pub fn set_client_release(release: impl Into<String>) {
     // A second call keeps the first name; nothing to report.
     let _ = CLIENT_RELEASE.set(release.into());
@@ -529,7 +530,7 @@ fn client_release() -> String {
     CLIENT_RELEASE
         .get()
         .cloned()
-        .unwrap_or_else(|| format!("Mumcord {}", env!("CARGO_PKG_VERSION")))
+        .unwrap_or_else(|| format!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")))
 }
 
 /// The login messages in the order the server must receive them: Version, then Authenticate.
@@ -1459,8 +1460,8 @@ impl Handle {
         self.send(Frame::from_message(MessageType::PermissionQuery, &m))
     }
 
-    /// Asks the server for a channel's groups and ACL entries (the ACL editor and the group lookup,
-    /// issue #300). The answer arrives as [`Event::Acl`].
+    /// Asks the server for a channel's groups and ACL entries (for an ACL editor or a group
+    /// lookup). The answer arrives as [`Event::Acl`].
     ///
     /// Standard servers answer the query only for users with the Write permission in that channel or
     /// in the root channel, so a refusal arrives as [`Event::PermissionDenied`] with
@@ -1475,7 +1476,7 @@ impl Handle {
         self.send(Frame::from_message(MessageType::Acl, &m))
     }
 
-    /// Removes a person from the server (issue #253). `ban` is false for a kick, which the person
+    /// Removes a person from the server. `ban` is false for a kick, which the person
     /// can come back from; true bans them with the server's default length on the certificate and
     /// address the server itself knows, so a chosen duration or a single target needs the ban list
     /// instead (see [`Handle::query_ban_list`]). Needs the Kick, or the Ban, permission in the root
@@ -1496,7 +1497,7 @@ impl Handle {
         self.send(Frame::from_message(MessageType::UserRemove, &m))
     }
 
-    /// Asks the server for its ban list (issue #254); the answer arrives as [`Event::BanList`].
+    /// Asks the server for its ban list; the answer arrives as [`Event::BanList`].
     /// Standard servers answer only users with the Ban permission in the root channel, so a
     /// refusal arrives as [`Event::PermissionDenied`].
     pub fn query_ban_list(&self) -> Result<(), CommandError> {
@@ -1507,8 +1508,8 @@ impl Handle {
     }
 
     /// Replaces the server's ban list. The protocol has no single-entry change: the server takes
-    /// the message as the whole list, so the caller sends back what it read plus its own change
-    /// (FR-10.66). Needs the Ban permission in the root channel.
+    /// the message as the whole list, so the caller sends back what it read plus its own
+    /// change. Needs the Ban permission in the root channel.
     pub fn send_ban_list(&self, bans: &[crate::ban::Ban]) -> Result<(), CommandError> {
         self.send(Frame::from_message(
             MessageType::BanList,
@@ -1516,7 +1517,7 @@ impl Handle {
         ))
     }
 
-    /// Asks the server for its registered accounts (issue #256); the answer arrives as
+    /// Asks the server for its registered accounts; the answer arrives as
     /// [`Event::UserList`], as does every list the server pushes after a change. Standard servers
     /// answer only users with the Register permission in the root channel, so a refusal arrives as
     /// [`Event::PermissionDenied`].
@@ -1527,7 +1528,7 @@ impl Handle {
         ))
     }
 
-    /// Changes one registered account (issue #256): `Some(name)` renames it, `None` removes the
+    /// Changes one registered account: `Some(name)` renames it, `None` removes the
     /// registration and leaves the person free to connect as a guest again. Unlike the ban list the
     /// server applies this entry on its own, so one change is one message. Needs the Register
     /// permission in the root channel; a refusal (a name already taken, for example) arrives as
@@ -1845,7 +1846,7 @@ mod tests {
         ));
         handle.shared.state().server.version = Some(MumbleVersion::new(1, 4, 0));
         handle
-            .send_plugin_data(&[3, 4], "mumcord.test", b"{}".to_vec())
+            .send_plugin_data(&[3, 4], "example.test", b"{}".to_vec())
             .expect("queued");
         let Ok(Outgoing::Frame(frame)) = rx.try_recv() else {
             panic!("expected a frame");
@@ -1854,7 +1855,7 @@ mod tests {
         let m = proto::PluginDataTransmission::decode(frame.payload).expect("decode");
         assert_eq!(m.sender_session, Some(7));
         assert_eq!(m.receiver_sessions, vec![3, 4]);
-        assert_eq!(m.data_id.as_deref(), Some("mumcord.test"));
+        assert_eq!(m.data_id.as_deref(), Some("example.test"));
         assert_eq!(m.data.as_deref(), Some(&b"{}"[..]));
     }
 }
@@ -2175,7 +2176,10 @@ mod handshake_tests {
             MumbleVersion::from_wire(v.version_v1, v.version_v2)
                 .is_some_and(|v| v.supports_listening())
         );
-        assert!(v.release.is_some_and(|r| r.starts_with("Mumcord ")));
+        assert!(
+            v.release
+                .is_some_and(|r| r.starts_with("mumble-client-protocol "))
+        );
 
         let a = proto::Authenticate::decode(auth.payload).expect("authenticate");
         assert_eq!(a.username.as_deref(), Some("alice"));
@@ -2185,12 +2189,15 @@ mod handshake_tests {
 
     #[test]
     fn the_app_sets_the_release_name_servers_show() {
-        // Process-wide: keeps the "Mumcord " prefix the other handshake test checks for.
-        set_client_release("Mumcord dev~a1b2c3d");
-        set_client_release("Mumcord ignored");
+        // Process-wide: keeps the crate-name prefix the other handshake test checks for.
+        set_client_release("mumble-client-protocol dev~a1b2c3d");
+        set_client_release("mumble-client-protocol ignored");
         let [version, _] = handshake_frames("alice".to_owned(), None, Vec::new());
         let v = proto::Version::decode(version.payload).expect("version");
-        assert_eq!(v.release.as_deref(), Some("Mumcord dev~a1b2c3d"));
+        assert_eq!(
+            v.release.as_deref(),
+            Some("mumble-client-protocol dev~a1b2c3d")
+        );
     }
 
     #[test]

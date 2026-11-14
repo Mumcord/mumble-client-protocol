@@ -14,8 +14,8 @@ use tokio::time::Instant;
 
 use crate::framing::MessageType;
 
-/// How long low-priority plugin data may wait behind Mumcord's own plugin data before it is
-/// dropped: plugin messages are best-effort, and a stale one is worse than none (FR-6.36).
+/// How long low-priority plugin data may wait behind normal-priority plugin data before it is
+/// dropped: plugin messages are best-effort, and a stale one is worse than none.
 pub(crate) const LOW_PRIORITY_MAX_WAIT: Duration = Duration::from_secs(10);
 
 /// Which of the server's buckets a message counts against.

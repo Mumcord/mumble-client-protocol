@@ -367,7 +367,7 @@ mod tests {
         assert_eq!(out, [0x80, 0x81, 0x2C, 0xA0, 0x03, 1, 2, 3]);
     }
 
-    /// Issue #7: a payload within the budget must fit a voice packet whatever the header
+    /// A payload within the budget must fit a voice packet whatever the header
     /// carries (both formats, UDP or TCP tunnel use the same bytes).
     #[test]
     fn largest_payload_fits_a_voice_packet() {

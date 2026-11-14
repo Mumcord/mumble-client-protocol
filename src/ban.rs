@@ -1,8 +1,8 @@
-//! The server's ban list (Epic 4, issue #254).
+//! The server's ban list.
 //!
 //! A client asks for the list with `BanList { query: true }`; the server answers with the entries
-//! it has. Sending the message without `query` replaces the whole list, so Mumcord re-reads it
-//! before every save and applies only its own change (FR-10.66).
+//! it has. Sending the message without `query` replaces the whole list, so a client should re-read
+//! it before every save and apply only its own change.
 //!
 //! Only `address` + `mask` and `hash` ban anyone; name, reason, start and duration are labels the
 //! server keeps for admins. Every text here comes from the server and is untrusted input.
@@ -16,9 +16,9 @@ use crate::proto;
 pub const ADDRESS_LEN: usize = 16;
 
 /// One ban entry. `mask` is the subnet length in the address family the address displays as (32 for
-/// a single IPv4, 128 for a single IPv6), which is what the UI shows and what the change carries;
+/// a single IPv4, 128 for a single IPv6), which is what users see and what a change carries;
 /// the wire form counts it on the 16-byte address, so it is written back as
-/// [`wire_mask`] (issue #254, issue #253).
+/// [`wire_mask`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ban {
     pub address: IpAddr,
@@ -28,7 +28,7 @@ pub struct Ban {
     /// Hex SHA-1 certificate hash; empty or `None` means the ban covers the address only.
     pub hash: Option<String>,
     pub reason: Option<String>,
-    /// Start as the server sent it. Mumcord sends the same text back when it saves, so a server
+    /// Start as the server sent it. Sending the same text back on save means a server
     /// that writes a different shape keeps its own entries intact.
     pub start: Option<String>,
     /// Seconds; 0 means permanent.
@@ -46,7 +46,7 @@ impl Ban {
         self.hash.as_deref().is_some_and(|h| !h.is_empty())
     }
 
-    /// Start time; `None` when the server sent none or a shape Mumcord cannot read.
+    /// Start time; `None` when the server sent none or a shape this crate cannot read.
     pub fn start_time(&self) -> Option<SystemTime> {
         self.start.as_deref().and_then(parse_iso)
     }
@@ -86,7 +86,7 @@ pub fn from_message(message: &proto::BanList) -> Vec<Ban> {
             Some(Ban {
                 address,
                 // The server counts the length on the 16-byte wire form, so it is read back in the
-                // address's own family (issue #254).
+                // address's own family.
                 mask: family_mask(address, e.mask),
                 name: e.name.clone(),
                 hash: e.hash.clone(),
@@ -116,9 +116,9 @@ pub fn to_message(bans: &[Ban]) -> proto::BanList {
 
 /// The length the server counts on the 16-byte wire address. mumble-server compares the first
 /// `mask` bits of that form, so an IPv4 entry written as 32 matches every IPv4 client: a single
-/// address must go out as 128 (issue #253, measured against the local test server).
+/// address must go out as 128 (measured against a local test server).
 /// The length in the family the address shows: servers count the bits on the 16-byte wire form, so
-/// an IPv4-mapped entry arrives as 128 for what the UI calls /32.
+/// an IPv4-mapped entry arrives as 128 for what users call /32.
 fn family_mask(address: IpAddr, bits: u32) -> u32 {
     match address {
         IpAddr::V4(_) if bits > 32 => bits - 96,
@@ -147,7 +147,7 @@ fn entry(ban: &Ban) -> proto::ban_list::BanEntry {
 
 /// IPv4 is read as IPv4-mapped when the server sends 16 bytes (the protocol's own form), and as
 /// 4 bytes on servers that still write it that way. Also used for the address a `UserStats` answer
-/// carries (issue #253).
+/// carries.
 pub fn read_address(bytes: &[u8]) -> Option<IpAddr> {
     match bytes {
         &[a, b, c, d] => Some(IpAddr::V4([a, b, c, d].into())),
@@ -205,7 +205,7 @@ pub fn parse_iso(text: &str) -> Option<SystemTime> {
     UNIX_EPOCH.checked_add(Duration::from_secs(u64::try_from(secs).ok()?))
 }
 
-/// Writes a start time for a ban Mumcord adds, in the shape clients send: extended ISO without a
+/// Writes a start time for a new ban, in the shape clients send: extended ISO without a
 /// zone, which the server reads as UTC.
 pub fn format_start(when: SystemTime) -> String {
     let secs = when
@@ -361,7 +361,7 @@ mod tests {
             from_message(&to_message(std::slice::from_ref(&ban)))[0],
             ban
         );
-        // The date maths must agree with itself, or a ban Mumcord adds gets a wrong start.
+        // The date maths must agree with itself, or a new ban gets a wrong start.
         assert_eq!(
             format_start(parse_iso("2026-11-03T20:21:00Z").expect("parsable")),
             "2026-11-03T20:21:00.000Z"

@@ -1,4 +1,4 @@
-//! A read-only view of the control channel for debugging tools such as Mumcord's packet
+//! A read-only view of the control channel for debugging tools such as a packet
 //! inspector. The connection hands every frame it writes or reads to a [`PacketTap`], but only
 //! while [`PacketTap::enabled`] says so; otherwise the cost is one atomic load per frame.
 
@@ -95,7 +95,7 @@ mod tests {
             sender_session: Some(3),
             receiver_sessions: vec![4, 5],
             data: Some(b"{}".to_vec()),
-            data_id: Some("mumcord.test".into()),
+            data_id: Some("example.test".into()),
         };
         let frame = Frame::from_message(MessageType::PluginDataTransmission, &m);
         let tapped = TappedFrame::new(TapDirection::Sent, frame.kind, &frame.payload, None);
@@ -103,7 +103,7 @@ mod tests {
         let data = tapped.plugin_data.expect("decoded");
         assert_eq!(data.sender, Some(3));
         assert_eq!(data.receivers, vec![4, 5]);
-        assert_eq!(data.data_id, "mumcord.test");
+        assert_eq!(data.data_id, "example.test");
         assert_eq!(&data.data[..], b"{}");
 
         let text = proto::TextMessage {
