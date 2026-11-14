@@ -1,0 +1,37 @@
+name: Feature request
+description: Suggest an idea or improvement for mumble-client-protocol.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        mumble-client-protocol covers the client side of the Mumble protocol and stays compatible with standard Mumble servers.
+        Private protocol extensions are out of scope.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: Describe the situation, not only the solution.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Your idea
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Control channel and messages
+        - Server state
+        - Voice transport
+        - Server queries (bans, registered users)
+        - Build and packaging
+        - Other
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives or workarounds you've considered
