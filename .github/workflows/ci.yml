@@ -1,0 +1,127 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  # The release workflow runs these checks as its test suite.
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+  RUSTDOCFLAGS: -D warnings
+  CARGO_DENY_VERSION: 0.20.2
+
+jobs:
+  check:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test
+
+      - name: Documentation
+        run: cargo doc --no-deps
+
+      - name: Examples
+        run: cargo build --examples
+
+      - name: Package dry run
+        if: runner.os == 'Linux'
+        run: cargo package
+
+  msrv:
+    name: Minimum Rust version (1.90)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: "1.90"
+
+      - name: Build everything
+        run: cargo check --all-targets
+
+  deny:
+    name: Dependency checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+
+      - name: Restore cargo-deny
+        id: deny
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/cargo-deny
+          key: cargo-deny-${{ runner.os }}-${{ runner.arch }}-${{ env.CARGO_DENY_VERSION }}
+
+      - name: Install cargo-deny
+        if: steps.deny.outputs.cache-hit != 'true'
+        run: cargo install --locked cargo-deny --version "$CARGO_DENY_VERSION"
+
+      - name: Advisories, licences, bans and sources
+        run: cargo deny check
+
+  live:
+    name: Live tests (local Mumble servers)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+
+      # up.sh seeds the channels with sqlite3; it creates a throwaway password and certificate.
+      - name: Start the local test servers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends sqlite3
+          testenv/up.sh
+
+      # One thread: several tests change server-wide state (ban list, registered users).
+      - name: Live tests
+        env:
+          MUMBLE_LIVE: "1"
+        run: cargo test --tests -- --ignored --test-threads=1
+
+      - name: Server logs
+        if: failure()
+        run: |
+          for c in $(docker ps -a --format '{{.Names}}' | grep '^mcp-testenv-'); do
+            echo "::group::$c"; docker logs --tail 50 "$c"; echo "::endgroup::"
+          done
+
+      - name: Stop the servers
+        if: always()
+        run: testenv/down.sh --purge

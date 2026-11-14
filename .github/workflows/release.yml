@@ -1,0 +1,205 @@
+# Releases mumble-client-protocol: publishes the crate to crates.io and creates the GitHub release.
+#
+# Starts when a version tag (vX.Y.Z) is pushed. Started by hand (Actions -> Release -> Run
+# workflow) it is a rehearsal by default: everything is checked and packaged, but nothing is
+# published and no release is created. A real publish only ever happens from a version tag.
+# The steps for the maintainer are in RELEASING.md.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Rehearsal: check and package only, publish nothing and create no release."
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+# crates.io versions can never be replaced; never run two releases at once.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  PACKAGE: mumble-client-protocol
+  # A pushed tag is always a real release; a run started by hand is one only if the box
+  # "dry_run" was cleared.
+  DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+
+jobs:
+  check:
+    name: Check version and changelog
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Say what this run does
+        run: |
+          if [[ "$DRY_RUN" == "true" ]]; then
+            echo "::notice title=Dry run::Rehearsal only. Nothing is published to crates.io and no GitHub release is created."
+          else
+            echo "::notice title=Real release::This run publishes to crates.io and creates the GitHub release for $GITHUB_REF_NAME."
+          fi
+
+      - name: A real release needs a version tag
+        if: env.DRY_RUN != 'true' && !startsWith(github.ref, 'refs/tags/v')
+        run: |
+          echo "::error::A real release only runs from a version tag (vX.Y.Z). Push the tag, or keep dry_run switched on."
+          exit 1
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+
+      - name: Check the package version
+        id: version
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r --arg name "$PACKAGE" '.packages[] | select(.name == $name) | .version')
+          echo "$PACKAGE is at version $version"
+          if [[ "$GITHUB_REF" == refs/tags/v* && "${GITHUB_REF_NAME#v}" != "$version" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match the package version $version."
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      # A release needs its own section in the changelog. A rehearsal may run before that
+      # section exists; it then shows the notes that are collected under "Unreleased".
+      - name: Check the changelog
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if notes=$(.github/scripts/changelog-section.sh "$VERSION"); then
+            echo "CHANGELOG.md has a section for $VERSION."
+          elif [[ "$DRY_RUN" == "true" ]]; then
+            echo "::notice::CHANGELOG.md has no section [$VERSION] yet. The release itself needs one; this rehearsal shows [Unreleased] instead."
+            notes=$(.github/scripts/changelog-section.sh Unreleased)
+          else
+            echo "::error::CHANGELOG.md has no section [$VERSION]. Rename [Unreleased] to [$VERSION] before tagging (see RELEASING.md)."
+            exit 1
+          fi
+          {
+            echo "## Release notes for $PACKAGE $VERSION"
+            echo
+            echo "$notes"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  tests:
+    name: Tests
+    needs: check
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    name: Publish to crates.io
+    needs: [check, tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # crates.io Trusted Publishing is registered for this workflow file and this environment.
+    environment: release
+    permissions:
+      contents: read
+      id-token: write # lets crates.io verify that this workflow is the one asking for a token
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+      # Only needed for the very first publish: Trusted Publishing works once the package exists
+      # on crates.io. While this secret is set it is used; without it, Trusted Publishing is.
+      HAVE_TOKEN_SECRET: ${{ secrets.CARGO_REGISTRY_TOKEN != '' }}
+    steps:
+      - name: Say what this run does
+        run: |
+          if [[ "$DRY_RUN" == "true" ]]; then
+            echo "=================================================================="
+            echo " DRY RUN - nothing is published to crates.io, no release is made"
+            echo "=================================================================="
+            echo "::notice title=Dry run::The package is only built and checked. Nothing is published."
+          else
+            echo "=================================================================="
+            echo " REAL PUBLISH - the package goes to crates.io and cannot be removed"
+            echo "=================================================================="
+            echo "::notice title=Real publish::Publishing $GITHUB_REF_NAME to crates.io."
+          fi
+
+      - name: A real publish needs a version tag
+        if: env.DRY_RUN != 'true' && !startsWith(github.ref, 'refs/tags/v')
+        run: |
+          echo "::error::A real publish only runs from a version tag (vX.Y.Z)."
+          exit 1
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+
+      - name: See whether the version is already on crates.io
+        id: plan
+        run: |
+          if .github/scripts/crates-io-has.sh "$PACKAGE" "$VERSION"; then
+            echo "::notice::$PACKAGE $VERSION is already on crates.io; nothing to publish."
+            echo "todo=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "$PACKAGE $VERSION is not on crates.io yet."
+            echo "todo=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Package (dry run)
+        if: env.DRY_RUN == 'true'
+        run: |
+          cargo publish --dry-run
+          echo "::notice title=Dry run finished::A real release would now publish $PACKAGE $VERSION."
+
+      - name: Get a short-lived crates.io token (Trusted Publishing)
+        id: auth
+        if: env.DRY_RUN != 'true' && env.HAVE_TOKEN_SECRET != 'true' && steps.plan.outputs.todo == 'true'
+        uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
+
+      - name: Publish
+        if: env.DRY_RUN != 'true' && steps.plan.outputs.todo == 'true'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN || steps.auth.outputs.token }}
+        run: |
+          if [[ "$DRY_RUN" == "true" || "$GITHUB_REF" != refs/tags/v* ]]; then
+            echo "::error::Refusing to publish: this is a dry run or not a version tag."
+            exit 1
+          fi
+          cargo publish
+
+  github-release:
+    name: GitHub release
+    needs: [check, publish]
+    if: github.event_name == 'push' || !inputs.dry_run
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # creates the release
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: A real release needs a version tag
+        if: env.DRY_RUN == 'true' || !startsWith(github.ref, 'refs/tags/v')
+        run: |
+          echo "::error::A release is only created from a version tag (vX.Y.Z)."
+          exit 1
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Create the release
+        run: |
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "::notice::The release $GITHUB_REF_NAME already exists; it is left as it is."
+            exit 0
+          fi
+          .github/scripts/changelog-section.sh "$VERSION" > "$RUNNER_TEMP/notes.md"
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "$PACKAGE $VERSION" --notes-file "$RUNNER_TEMP/notes.md"
